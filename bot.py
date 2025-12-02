@@ -41,8 +41,21 @@ def load_data(filename):
         return {}
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
+            # 先尝试读取，如果为空文件，直接返回空字典
+            content = f.read()
+            if not content:
+                return {}
+            return json.loads(content)
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        print(f"警告：读取或解析 {filename} 时出错: {e}。")
+        # 尝试备份损坏的文件
+        if os.path.exists(filename):
+            try:
+                bak_filename = f"{filename}.{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
+                os.rename(filename, bak_filename)
+                print(f"已将损坏的文件备份为: {bak_filename}")
+            except Exception as bak_e:
+                print(f"备份文件时出错: {bak_e}")
         return {}
 
 def save_data(data, filename):
@@ -57,6 +70,21 @@ async def on_ready():
     if client.guilds:
         main_guild = client.guilds[0]
         print(f"机器人已在服务器 '{main_guild.name}' (ID: {main_guild.id}) 中准备就绪。")
+        
+        # 打印功能列表
+        print("\n--- 机器人功能列表 ---")
+        print("【自动功能】")
+        print("  - 新成员自动分配“👀 观众”角色。")
+        print("  - “👀 观众”发布图片后自动升级为“🎨 创作者”。")
+        print(f"  - 在任意频道对图片点赞“{TRIGGER_EMOJI}”即可自动收录到“{GALLERY_CHANNEL_NAME}”论坛。")
+        print("\n【用户命令】")
+        print("  - `签到`：每日签到获取 10 画泥。")
+        print("  - `我的画泥`：查询当前画泥余额。")
+        print(f"  - `购买周星`：花费 10 画泥购买“{STAR_ROLE_NAME}”角色（有效期7天）。")
+        print("\n【管理员命令】")
+        print("  - `设置初始角色`：为服务器内所有无角色的成员批量分配“👀 观众”角色。")
+        print("-----------------------\n")
+
         check_temp_roles.start()
     else:
         print("错误：机器人未加入任何服务器。")
@@ -118,7 +146,7 @@ async def on_message(message):
                 return
             try:
                 await message.author.add_roles(star_role)
-                expiry_time = datetime.datetime.utcnow() + datetime.timedelta(days=7)
+                expiry_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)
                 if "temp_roles" not in currency_data[user_id]:
                     currency_data[user_id]["temp_roles"] = {}
                 currency_data[user_id]["temp_roles"]["star_of_the_week"] = expiry_time.isoformat()
@@ -178,7 +206,81 @@ async def on_message(message):
             except Exception as e:
                 print(f'为 {message.author.name} 升级角色时出错: {e}')
 
-# ... (on_raw_reaction_add 和 on_voice_state_update 保持不变)
+@client.event
+async def on_raw_reaction_add(payload):
+    if str(payload.emoji) != TRIGGER_EMOJI:
+        return
+
+    channel = await client.fetch_channel(payload.channel_id)
+    message = await channel.fetch_message(payload.message_id)
+    
+    # 确保消息有附件且不是机器人自己发的
+    if not message.attachments or message.author.bot:
+        return
+
+    # 检查机器人是否已经处理过这个消息
+    for reaction in message.reactions:
+        if reaction.emoji == PROCESSED_EMOJI and reaction.me:
+            print(f"消息 {message.id} 已被标记为处理过，跳过。")
+            return
+
+    gallery_channel = discord.utils.get(message.guild.channels, name=GALLERY_CHANNEL_NAME)
+    if not gallery_channel or not isinstance(gallery_channel, discord.ForumChannel):
+        print(f"错误：未找到名为 '{GALLERY_CHANNEL_NAME}' 的论坛频道。")
+        return
+
+    author = message.author
+    author_id = str(author.id)
+    
+    print(f"[DEBUG] 开始处理作者 {author.name} (ID: {author_id}) 的点赞。")
+    author_threads = load_data(AUTHOR_THREADS_FILE)
+    print(f"[DEBUG] 加载的 author_threads.json 内容: {author_threads}")
+
+    thread_id = author_threads.get(author_id)
+    print(f"[DEBUG] 为作者ID {author_id} 查找到的帖子ID是: {thread_id}")
+    thread = None
+
+    if thread_id:
+        try:
+            thread = await client.fetch_channel(thread_id)
+        except discord.NotFound:
+            print(f"找不到帖子 ID: {thread_id}，将为 {author.name} 创建新帖。")
+            thread_id = None # 强制重新创建
+
+    if not thread_id:
+        try:
+            thread, _ = await gallery_channel.create_thread(
+                name=f"{author.display_name}的个人作品集",
+                content=f"欢迎来到 {author.mention} 的个人作品集！这里会收录他/她被点赞的优秀作品。",
+                applied_tags=[] # 如果有标签可以加
+            )
+            author_threads[author_id] = thread.id
+            print(f"[DEBUG] 准备保存新的 author_threads 数据: {author_threads}")
+            save_data(author_threads, AUTHOR_THREADS_FILE)
+            print(f"为 {author.name} 创建了新的作品集帖子。")
+        except Exception as e:
+            print(f"创建帖子时出错: {e}")
+            return
+    
+    if thread:
+        try:
+            image_url = message.attachments[0].url
+            embed = discord.Embed(
+                description=f"**原消息链接：** [点击跳转]({message.jump_url})",
+                color=discord.Color.blue()
+            )
+            embed.set_image(url=image_url)
+            embed.set_author(name=f"作者：{author.display_name}", icon_url=author.display_avatar.url)
+            embed.set_footer(text=f"发布于：{message.created_at.strftime('%Y-%m-%d %H:%M')}")
+            
+            await thread.send(embed=embed)
+            print(f"已将 {author.name} 的作品添加到其作品集中。")
+            
+            # 添加处理完成的标记
+            await message.add_reaction(PROCESSED_EMOJI)
+
+        except Exception as e:
+            print(f"发送作品到帖子时出错: {e}")
 
 # --- 后台任务：检查临时角色到期 ---
 @tasks.loop(hours=1)
@@ -187,7 +289,7 @@ async def check_temp_roles():
         return
     print("[TASK] 开始检查临时角色到期...")
     currency_data = load_data(CURRENCY_DATA_FILE)
-    current_time = datetime.datetime.utcnow()
+    current_time = datetime.datetime.now(datetime.timezone.utc)
     users_to_update = list(currency_data.keys())
     for user_id in users_to_update:
         user_data = currency_data.get(user_id, {})
@@ -195,6 +297,10 @@ async def check_temp_roles():
             roles_to_remove = []
             for role_key, expiry_iso in list(user_data["temp_roles"].items()):
                 expiry_time = datetime.datetime.fromisoformat(expiry_iso)
+                # 确保 expiry_time 是 aware 的，如果它不是
+                if expiry_time.tzinfo is None:
+                    expiry_time = expiry_time.replace(tzinfo=datetime.timezone.utc)
+
                 if current_time >= expiry_time:
                     roles_to_remove.append(role_key)
                     member = main_guild.get_member(int(user_id))
