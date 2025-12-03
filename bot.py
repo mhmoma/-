@@ -172,21 +172,33 @@ async def on_message(message):
             return
 
         updated_count = 0
-        await message.channel.send("正在为现有成员分配初始角色，这可能需要一些时间...")
+        total_members_checked = 0
+        await message.channel.send("正在获取服务器成员列表并分配初始角色，这可能需要一些时间...")
 
-        for member in message.guild.members:
-            if member.bot:
-                continue
+        try:
+            async for member in message.guild.fetch_members(limit=None):
+                total_members_checked += 1
+                if member.bot:
+                    continue
+
+                has_spectator = spectator_role in member.roles
+                has_creator = creator_role and creator_role in member.roles
+
+                # 如果成员没有任何关键角色，则分配
+                if not has_spectator and not has_creator:
+                    try:
+                        await member.add_roles(spectator_role)
+                        updated_count += 1
+                        print(f"已为现有成员 {member.name} 分配角色 '👀 观众'")
+                    except discord.Forbidden:
+                        print(f"[权限错误] 无法为 {member.name} 分配角色。请检查机器人的角色是否拥有'管理角色'权限，并且其位置高于'👀 观众'角色。")
+                    except Exception as e:
+                        print(f"为 {member.name} 分配角色时发生未知错误: {e}")
+        except discord.Forbidden:
+            await message.channel.send("错误：机器人缺少'查看服务器成员'的权限，无法获取成员列表。请检查机器人权限。")
+            return
             
-            if spectator_role not in member.roles and (not creator_role or creator_role not in member.roles):
-                try:
-                    await member.add_roles(spectator_role)
-                    updated_count += 1
-                    print(f"已为现有成员 {member.name} 分配角色 '👀 观众'")
-                except Exception as e:
-                    print(f"为 {member.name} 分配角色时出错: {e}")
-        
-        await message.channel.send(f"操作完成！共为 {updated_count} 名现有成员分配了“👀 观众”角色。")
+        await message.channel.send(f"操作完成！共检查了 {total_members_checked} 名成员，为 {updated_count} 名成员分配了“👀 观众”角色。")
         return
     
     # ping
@@ -198,13 +210,19 @@ async def on_message(message):
     if message.attachments:
         spectator_role = discord.utils.get(message.guild.roles, name="👀 观众")
         creator_role = discord.utils.get(message.guild.roles, name="🎨 创作者")
-        if spectator_role and creator_role and spectator_role in message.author.roles:
+        
+        # 检查用户是否是“观众”并且还不是“创作者”
+        if spectator_role and creator_role and spectator_role in message.author.roles and creator_role not in message.author.roles:
             try:
-                await message.author.remove_roles(spectator_role)
-                await message.author.add_roles(creator_role)
+                # 同时执行移除和添加操作
+                await message.author.remove_roles(spectator_role, reason="升级为创作者")
+                await message.author.add_roles(creator_role, reason="发布了第一个作品")
                 await message.channel.send(f'恭喜 {message.author.mention} 发布了作品，成功晋级为 🎨 创作者！')
+                print(f"用户 {message.author.name} 已从 '👀 观众' 升级为 '🎨 创作者'。")
+            except discord.Forbidden:
+                print(f"[权限错误] 无法为 {message.author.name} 升级角色。请检查机器人角色位置和'管理角色'权限。")
             except Exception as e:
-                print(f'为 {message.author.name} 升级角色时出错: {e}')
+                print(f'为 {message.author.name} 升级角色时发生未知错误: {e}')
 
 @client.event
 async def on_raw_reaction_add(payload):
