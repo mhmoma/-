@@ -32,7 +32,7 @@ TRIGGER_EMOJI = "👍"
 PROCESSED_EMOJI = "✅"
 AUTHOR_THREADS_FILE = "author_threads.json"
 CURRENCY_DATA_FILE = "currency_data.json"
-STAR_ROLE_NAME = "✨ 本周之星"
+STAR_ROLE_NAME = "  "
 main_guild = None # 用于存储服务器对象
 
 # --- 辅助函数：数据读写 ---
